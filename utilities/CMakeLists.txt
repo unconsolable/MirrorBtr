@@ -158,7 +158,7 @@ MYSQL_ADD_EXECUTABLE(innochecksum
   innochecksum.cc
   COMPONENT Server
   DEPENDENCIES GenError
-  LINK_LIBRARIES mysys innodb_zipdecompress ext::lz4 extra::rapidjson
+  LINK_LIBRARIES mysys innodb_zipdecompress ext::lz4 extra::rapidjson TBB::tbb
   )
 TARGET_COMPILE_DEFINITIONS(innochecksum PRIVATE UNIV_NO_ERR_MSGS UNIV_LIBRARY)
 IF(MY_COMPILER_IS_GNU_OR_CLANG)
@@ -177,7 +177,7 @@ MYSQL_ADD_EXECUTABLE(ibd2sdi
   ibd2sdi.cc
   COMPONENT Server
   DEPENDENCIES GenError
-  LINK_LIBRARIES mysys innodb_zipdecompress ext::lz4 extra::rapidjson
+  LINK_LIBRARIES mysys innodb_zipdecompress ext::lz4 extra::rapidjson TBB::tbb
   )
 TARGET_COMPILE_DEFINITIONS(ibd2sdi PRIVATE UNIV_NO_ERR_MSGS UNIV_LIBRARY DISABLE_PSI_MEMORY)
 IF(MY_COMPILER_IS_GNU_OR_CLANG)

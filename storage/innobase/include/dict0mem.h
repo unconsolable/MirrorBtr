@@ -71,6 +71,8 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "sql/sql_const.h" /* MAX_KEY_LENGTH */
 #include "sql/table.h"
 
+#include "btr/shadow/shadow.h"
+
 #include <algorithm>
 #include <iterator>
 #include <memory> /* std::unique_ptr */
@@ -1242,6 +1244,8 @@ struct dict_index_t {
 
   /** Flag whether need to fill dd tables when it's a fulltext index. */
   bool fill_dd;
+
+  shadow::Shadow<uint64_t, page_no_t> shadow;
 
   /** Set instant nullable
   @param[in]  n  nullable fields before first INSTANT ADD */

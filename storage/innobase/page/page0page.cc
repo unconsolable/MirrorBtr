@@ -39,7 +39,9 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "ibuf0ibuf.h"
 #include "page0cur.h"
 #include "page0page.h"
+#include <byteswap.h>
 #include "page0zip.h"
+#include "btr/shadow/shadow_helper.h"
 #ifndef UNIV_HOTBACKUP
 #include "btr0sea.h"
 #include "fut0lst.h"
@@ -499,7 +501,7 @@ void page_copy_rec_list_end_no_locks(
     rec_t *ins_rec;
     offsets = rec_get_offsets(cur1_rec, index, offsets, ULINT_UNDEFINED,
                               UT_LOCATION_HERE, &heap);
-    ins_rec = page_cur_insert_rec_low(cur2, index, cur1_rec, offsets, mtr);
+    ins_rec = page_cur_insert_rec_low(cur2, index, cur1_rec, offsets, mtr, new_block);
     if (UNIV_UNLIKELY(!ins_rec)) {
       ib::fatal(UT_LOCATION_HERE, ER_IB_MSG_862)
           << "Rec offset " << page_offset(rec) << ", cur1 offset "
@@ -649,8 +651,6 @@ rec_t *page_copy_rec_list_end(
     mem_heap_free(heap);
   }
 
-  btr_search_update_hash_on_move(new_block, block, index);
-
   return (ret);
 }
 
@@ -720,7 +720,7 @@ rec_t *page_copy_rec_list_start(
       rec_t *cur1_rec = page_cur_get_rec(&cur1);
       offsets = rec_get_offsets(cur1_rec, index, offsets, ULINT_UNDEFINED,
                                 UT_LOCATION_HERE, &heap);
-      cur2 = page_cur_insert_rec_low(cur2, index, cur1_rec, offsets, mtr);
+      cur2 = page_cur_insert_rec_low(cur2, index, cur1_rec, offsets, mtr, new_block);
       ut_a(cur2);
 
       page_cur_move_to_next(&cur1);

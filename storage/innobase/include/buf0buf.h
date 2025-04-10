@@ -47,7 +47,9 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "ut0rbt.h"
 
 #include "buf/buf.h"
+#include "btr/shadow/alexol/alex_base.h"
 
+#include <cstdint>
 #include <ostream>
 
 // Forward declaration
@@ -1912,6 +1914,14 @@ struct buf_block_t {
   page_zip_des_t const *get_page_zip() const noexcept {
     return page.zip.data != nullptr ? &page.zip : nullptr;
   }
+
+  struct slot_model_t {
+    std::mutex build_mu_;
+
+    bool build_ = false;
+    alexol::LinearModel<uint64_t> model_;
+  };
+  mutable slot_model_t model;
 };
 
 inline bool buf_block_t::is_root() const {

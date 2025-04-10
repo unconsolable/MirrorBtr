@@ -264,6 +264,14 @@ IF(MY_COMPILER_IS_GNU AND NOT CMAKE_CXX_COMPILER_VERSION VERSION_LESS 11)
     COMPILE_FLAGS "-Wno-free-nonheap-object")
 ENDIF()
 
+# instruction set support for shadow
+IF(MY_COMPILER_IS_GNU)
+  ADD_COMPILE_FLAGS(
+    ${INNOBASE_SOURCES}
+    COMPILE_FLAGS "-mpopcnt -mlzcnt -mbmi -mbmi2"
+  )
+ENDIF()
+
 # The combination of
 # ut_ad(strlen(dir_path) + 1 + strlen(dir_name) + 1 < sizeof(path))
 # and
@@ -323,7 +331,7 @@ ADD_LIBRARY(innodb_zipdecompress STATIC ${INNOBASE_ZIP_DECOMPRESS_SOURCES})
 TARGET_COMPILE_DEFINITIONS(
   innodb_zipdecompress PRIVATE DISABLE_PSI_MEMORY UNIV_LIBRARY UNIV_NO_ERR_MSGS)
 TARGET_LINK_LIBRARIES(innodb_zipdecompress
-  PRIVATE extra::rapidjson ext::lz4 ext::zlib)
+  PRIVATE extra::rapidjson ext::lz4 ext::zlib TBB::tbb)
 ADD_DEPENDENCIES(innodb_zipdecompress GenError)
 
 MY_CHECK_CXX_COMPILER_WARNING("-Wmissing-profile" HAS_MISSING_PROFILE)
@@ -342,7 +350,7 @@ MYSQL_ADD_PLUGIN(innobase
   MANDATORY
   MODULE_OUTPUT_NAME ha_innodb
   LINK_LIBRARIES sql_dd sql_gis ext::zlib ext::lz4 ${NUMA_LIBRARY}
-                 extra::rapidjson)
+                 extra::rapidjson TBB::tbb)
 
 # On linux: /usr/include/stdio.h:#define BUFSIZ 8192
 # On Solaris: /usr/include/iso/stdio_iso.h:#define    BUFSIZ  1024

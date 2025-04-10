@@ -212,7 +212,7 @@ static inline rec_t *page_cur_tuple_insert(page_cur_t *cursor,
     insert_rec = page_cur_insert_rec_zip(cursor, index, rec, *offsets, mtr);
   } else {
     insert_rec =
-        page_cur_insert_rec_low(cursor->rec, index, rec, *offsets, mtr);
+        page_cur_insert_rec_low(cursor->rec, index, rec, *offsets, mtr, page_cur_get_block(cursor));
   }
 
 #ifdef UNIV_DEBUG
@@ -271,6 +271,6 @@ static inline rec_t *page_cur_rec_insert(
   if (buf_block_get_page_zip(cursor->block)) {
     return (page_cur_insert_rec_zip(cursor, index, rec, offsets, mtr));
   } else {
-    return (page_cur_insert_rec_low(cursor->rec, index, rec, offsets, mtr));
+    return (page_cur_insert_rec_low(cursor->rec, index, rec, offsets, mtr, page_cur_get_block(cursor)));
   }
 }

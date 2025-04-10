@@ -156,7 +156,8 @@ static inline rec_t *page_cur_rec_insert(page_cur_t *cursor, const rec_t *rec,
     dict_index_t *index, /*!< in: record descriptor */
     const rec_t *rec,    /*!< in: pointer to a physical record */
     ulint *offsets,      /*!< in/out: rec_get_offsets(rec, index) */
-    mtr_t *mtr);         /*!< in: mini-transaction handle, or NULL */
+    mtr_t *mtr,          /*!< in: mini-transaction handle, or NULL */
+    buf_block_t *block = nullptr);  /*!< in: buffer block (to update linearmodel), or NULL */
 
 /** Inserts a record next to page cursor on an uncompressed page.
 @param[in]      current_rec     Pointer to current record after which

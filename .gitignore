@@ -19,7 +19,7 @@ source_downloads
 # Configuration files for Visual Studio Code
 .vscode/
 
-build/
+build*/
 datatool/
 datatools/
 __pycache__/

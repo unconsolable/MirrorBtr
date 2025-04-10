@@ -33,6 +33,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
  *************************************************************************/
 
 #include "page0cur.h"
+#include <byteswap.h>
 
 #include "btr0btr.h"
 #include "ha_prototypes.h"
@@ -40,7 +41,10 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "mtr0log.h"
 
 #include <algorithm>
+#include <atomic>
+#include <sstream>
 #include "page0zip.h"
+#include "btr/shadow/shadow_helper.h"
 
 #ifndef UNIV_HOTBACKUP
 #include "gis0rtree.h"
@@ -635,7 +639,7 @@ void page_cur_search_with_match_bytes(
 #endif /* UNIV_ZIP_DEBUG */
   mem_heap_t *heap = nullptr;
   ulint offsets_[REC_OFFS_NORMAL_SIZE];
-  ulint *offsets = offsets_;
+  const ulint *offsets = offsets_;
   rec_offs_init(offsets_);
 
   ut_ad(dtuple_validate(tuple));
@@ -657,16 +661,17 @@ void page_cur_search_with_match_bytes(
   ut_d(page_check_dir(page));
 
 #ifdef PAGE_CUR_ADAPT
-  if (page_is_leaf(page) && (mode == PAGE_CUR_LE) &&
-      (page_header_get_field(page, PAGE_N_DIRECTION) > 3) &&
-      (page_header_get_ptr(page, PAGE_LAST_INSERT)) &&
-      (page_header_get_field(page, PAGE_DIRECTION) == PAGE_RIGHT)) {
-    if (page_cur_try_search_shortcut_bytes(
-            block, index, tuple, iup_matched_fields, iup_matched_bytes,
-            ilow_matched_fields, ilow_matched_bytes, cursor)) {
-      return;
-    }
-  }
+  // Disable it to gain lower latnecy
+  // if (page_is_leaf(page) && (mode == PAGE_CUR_LE) &&
+  //     (page_header_get_field(page, PAGE_N_DIRECTION) > 3) &&
+  //     (page_header_get_ptr(page, PAGE_LAST_INSERT)) &&
+  //     (page_header_get_field(page, PAGE_DIRECTION) == PAGE_RIGHT)) {
+  //   if (page_cur_try_search_shortcut_bytes(
+  //           block, index, tuple, iup_matched_fields, iup_matched_bytes,
+  //           ilow_matched_fields, ilow_matched_bytes, cursor)) {
+  //     return;
+  //   }
+  // }
 #ifdef PAGE_CUR_DBG
   if (mode == PAGE_CUR_DBG) {
     mode = PAGE_CUR_LE;
@@ -698,8 +703,175 @@ void page_cur_search_with_match_bytes(
   low = 0;
   up = page_dir_get_n_slots(page) - 1;
 
+  if (index->shadow.IsApplicable() && !block->model.build_) {
+    // If up is 1, there are only supremum & infimum records
+    if (up > 1) {
+      std::unique_lock lock(block->model.build_mu_);
+
+      if (!block->model.build_) {
+        // std::stringstream ss;
+        // ss << "Build leaf node linear model\n";
+        shadow::BuildLinearModel(block, index, page);
+        // std::cerr << ss.str();
+      }
+    }
+  }
+
+  const ulint *const cached_offsets{index->rec_cache.offsets};
+  auto get_rec_cached_offsets = [&](const rec_t *rec) -> const auto * {
+    if (cached_offsets && !page_cur_has_null(rec, index)) {
+#ifdef UNIV_DEBUG
+      {
+        const size_t n = dtuple_get_n_fields_cmp(tuple);
+        const auto *const offsets = rec_get_offsets(rec, index, offsets_, n,
+                                                    UT_LOCATION_HERE, &heap);
+        ut_a(n <= offsets[0]);
+        ut_a(n <= offsets[1]);
+        ut_a(n <= cached_offsets[0]);
+        ut_a(n <= cached_offsets[1]);
+        for (size_t i = 0; i < n; ++i) {
+          ulint len;
+          ulint len2;
+
+          const auto off = rec_get_nth_field(index, rec, offsets, i, &len);
+          const auto off2 =
+              rec_get_nth_field(index, rec, cached_offsets, i, &len2);
+          ut_a(off == off2);
+          ut_a(len == len2);
+        }
+      }
+#endif
+      return cached_offsets;
+    }
+    return rec_get_offsets(rec, index, offsets_,
+                           dtuple_get_n_fields_cmp(tuple), UT_LOCATION_HERE,
+                           &heap);
+  };
+
   /* Perform binary search until the lower and upper limit directory
   slots come to the distance 1 of each other */
+
+  if (index->shadow.IsApplicable() && block->model.build_) {
+    uint64_t key = shadow::GetDtupleKey(tuple);
+
+    double predict_pos = block->model.model_.predict_double(key);
+
+    ulint n_slots = page_dir_get_n_slots(page) - 1;
+    ulint predict_pos_int = predict_pos < 0 ? 0 : std::min(predict_pos, static_cast<double>(n_slots));
+    cur_matched_fields = 0;
+    cur_matched_bytes = 0;
+    // std::stringstream ss;
+    // ss << "Lookup " << key << " predict " << predict_pos_int << " up " << up << " low " << low;
+
+    slot = page_dir_get_nth_slot(page, predict_pos_int);
+    const rec_t *slot_rec = page_dir_slot_get_rec(slot);
+    bool is_infimum_record = predict_pos_int == 0;
+    bool is_supremum_record = predict_pos_int == n_slots;
+    if (!is_infimum_record && !is_supremum_record) {
+      offsets = get_rec_cached_offsets(slot_rec);
+      cmp = cmp_dtuple_rec_with_match_bytes(tuple, slot_rec, index, offsets,
+                                            &cur_matched_fields,
+                                            &cur_matched_bytes);
+    }
+
+    // separate the directory into two parts
+    // left side for low, right side for up
+    bool on_right_side = false;
+
+    if (mode == PAGE_CUR_G || mode == PAGE_CUR_LE) {
+      on_right_side = !is_infimum_record && (is_supremum_record || cmp < 0);
+    } else {
+      on_right_side = !is_infimum_record && (is_supremum_record || cmp <= 0);
+    }
+
+    if (on_right_side) {
+      // ss << " inf " << is_infimum_record << " sup " << is_supremum_record << " slot key " << slot_key << " update up\n";
+      // Iterate process won't access infimum/supremum record
+      up_matched_fields = cur_matched_fields;
+      up_matched_bytes = cur_matched_bytes;
+
+      ulint size = predict_pos_int;
+      ulint bound = 1;
+      while (bound < size) {
+        cur_matched_fields = 0;
+        cur_matched_bytes = 0;
+        
+        slot = page_dir_get_nth_slot(page, predict_pos_int - bound);
+        const rec_t * slot_rec = page_dir_slot_get_rec(slot);
+        offsets = get_rec_cached_offsets(slot_rec);
+        cmp = cmp_dtuple_rec_with_match_bytes(tuple, slot_rec, index, offsets,
+                                              &cur_matched_fields,
+                                              &cur_matched_bytes);
+
+        if (mode == PAGE_CUR_G || mode == PAGE_CUR_LE) {
+          on_right_side = cmp < 0;
+        } else {
+          on_right_side = cmp <= 0;
+        }
+
+        if (on_right_side) {
+          up_matched_fields = cur_matched_fields;
+          up_matched_bytes = cur_matched_bytes;
+          bound *= 2;
+        } else {
+          low_matched_fields = cur_matched_fields;
+          low_matched_bytes = cur_matched_bytes;
+          break;
+        }
+      }
+
+      low = predict_pos_int - std::min(bound, size);
+      if (low == 0) {
+        low_matched_fields = 0;
+        low_matched_bytes = 0;
+      }
+
+      up = predict_pos_int - bound / 2;
+    } else {
+      // ss << " inf " << is_infimum_record << " sup " << is_supremum_record << " slot key " << slot_key << " update low\n";
+      // Iterate process won't access infimum/supremum record
+      low_matched_fields = cur_matched_fields;
+      low_matched_bytes = cur_matched_bytes;
+
+      ulint size = n_slots - predict_pos_int;
+      ulint bound = 1;
+      while (bound < size) {
+        cur_matched_fields = 0;
+        cur_matched_bytes = 0;
+
+        slot = page_dir_get_nth_slot(page, predict_pos_int + bound);
+        const rec_t * slot_rec = page_dir_slot_get_rec(slot);
+        offsets = get_rec_cached_offsets(slot_rec);
+        cmp = cmp_dtuple_rec_with_match_bytes(tuple, slot_rec, index, offsets,
+                                              &cur_matched_fields,
+                                              &cur_matched_bytes);
+
+        if (mode == PAGE_CUR_G || mode == PAGE_CUR_LE) {
+          on_right_side = cmp < 0;
+        } else {
+          on_right_side = cmp <= 0;
+        }
+
+        if (!on_right_side) {
+          low_matched_fields = cur_matched_fields;
+          low_matched_bytes = cur_matched_bytes;
+          bound *= 2;
+        } else {
+          up_matched_fields = cur_matched_fields;
+          up_matched_bytes = cur_matched_bytes;
+          break;
+        }
+      }
+
+      low = predict_pos_int + bound / 2;
+
+      up = predict_pos_int + std::min(bound, size);
+      if (up == n_slots) {
+        up_matched_fields = 0;
+        up_matched_bytes = 0;
+      }
+    }
+  }
 
   while (up - low > 1) {
     mid = (low + up) / 2;
@@ -709,9 +881,7 @@ void page_cur_search_with_match_bytes(
     ut_pair_min(&cur_matched_fields, &cur_matched_bytes, low_matched_fields,
                 low_matched_bytes, up_matched_fields, up_matched_bytes);
 
-    offsets = rec_get_offsets(mid_rec, index, offsets_,
-                              dtuple_get_n_fields_cmp(tuple), UT_LOCATION_HERE,
-                              &heap);
+    offsets = get_rec_cached_offsets(mid_rec);
 
     cmp = cmp_dtuple_rec_with_match_bytes(tuple, mid_rec, index, offsets,
                                           &cur_matched_fields,
@@ -761,9 +931,7 @@ void page_cur_search_with_match_bytes(
     ut_pair_min(&cur_matched_fields, &cur_matched_bytes, low_matched_fields,
                 low_matched_bytes, up_matched_fields, up_matched_bytes);
 
-    offsets = rec_get_offsets(mid_rec, index, offsets_,
-                              dtuple_get_n_fields_cmp(tuple), UT_LOCATION_HERE,
-                              &heap);
+    offsets = get_rec_cached_offsets(mid_rec);
 
     cmp = cmp_dtuple_rec_with_match_bytes(tuple, mid_rec, index, offsets,
                                           &cur_matched_fields,
@@ -1232,7 +1400,8 @@ rec_t *page_cur_insert_rec_low(
     dict_index_t *index, /*!< in: record descriptor */
     const rec_t *rec,    /*!< in: pointer to a physical record */
     ulint *offsets,      /*!< in/out: rec_get_offsets(rec, index) */
-    mtr_t *mtr)          /*!< in: mini-transaction handle, or NULL */
+    mtr_t *mtr,          /*!< in: mini-transaction handle, or NULL */
+    buf_block_t *block)  /*!< in: buffer block (to update linearmodel), or NULL */
 {
   byte *insert_buf;
   ulint rec_size;
@@ -1404,6 +1573,10 @@ rec_t *page_cur_insert_rec_low(
 
     if (UNIV_UNLIKELY(n_owned == PAGE_DIR_SLOT_MAX_N_OWNED)) {
       page_dir_split_slot(page, nullptr, page_dir_find_owner_slot(owner_rec));
+
+      if (index->shadow.IsApplicable() && block->model.build_) {
+        shadow::BuildLinearModel(block, index, page);
+      }
     }
   }
 
@@ -2437,6 +2610,11 @@ void page_cur_delete_rec(
 
   if (cur_n_owned <= PAGE_DIR_SLOT_MIN_N_OWNED) {
     page_dir_balance_slot(page, page_zip, cur_slot_no);
+
+    const buf_block_t *block = page_cur_get_block(cursor);
+    if (index->shadow.IsApplicable() && block->model.build_) {
+      shadow::BuildLinearModel(block, index, page);
+    }
   }
 
 #ifdef UNIV_ZIP_DEBUG

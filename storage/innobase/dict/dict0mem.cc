@@ -769,6 +769,10 @@ void dict_mem_index_free(dict_index_t *index) /*!< in: index */
   ut_ad(index->magic_n == DICT_INDEX_MAGIC_N);
 
   index->destroy_fields_array();
+  {
+    using shadow_type = shadow::Shadow<uint64_t, page_no_t>;
+    index->shadow.~shadow_type();
+  }
 
 #ifndef UNIV_HOTBACKUP
   dict_index_zip_pad_mutex_destroy(index);

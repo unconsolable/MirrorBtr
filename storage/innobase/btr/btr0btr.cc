@@ -34,6 +34,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
 #include "btr0btr.h"
 
+#include <byteswap.h>
 #include <sys/types.h>
 
 #ifndef UNIV_HOTBACKUP
@@ -54,6 +55,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "srv0mon.h"
 #include "trx0trx.h"
 #include "ut0new.h"
+#include "btr/shadow/shadow_helper.h"
 #endif /* !UNIV_HOTBACKUP */
 
 #ifndef UNIV_HOTBACKUP
@@ -2372,10 +2374,11 @@ func_start:
     direction = FSP_UP;
     hint_page_no = page_no + 1;
 
-  } else if (btr_page_get_split_rec_to_left(cursor, &split_rec)) {
-    direction = FSP_DOWN;
-    hint_page_no = page_no - 1;
-    ut_ad(split_rec);
+  // Disable split to left, simplify shadow update
+  // } else if (btr_page_get_split_rec_to_left(cursor, &split_rec)) {
+  //   direction = FSP_DOWN;
+  //   hint_page_no = page_no - 1;
+  //   ut_ad(split_rec);
   } else {
     direction = FSP_UP;
     hint_page_no = page_no + 1;
@@ -2447,6 +2450,26 @@ func_start:
 
   btr_attach_half_pages(flags, cursor->index, block, first_rec, new_block,
                         direction, mtr);
+
+  ulint shadow_key = 0;
+  page_no_t shadow_page_no = 0;
+  
+  // calculate `shadow_key` and `shadow_page_no` here, otherwise `first_rec` may be an invalid record.
+  if (page_is_leaf(page) && !index->disable_ahi && btr_search_enabled && index->shadow.IsApplicable() && index->shadow.IsShadowBuild()) {
+    // new page may only has infimum & supremum records.
+    // here first_rec is used to insert to shadow,
+    // similar with `btr_attach_half_pages`.
+    {
+      shadow_key = shadow::GetRecordKey(index, first_rec);
+      shadow_page_no = page_get_page_no(new_page);
+
+      // std::stringstream ss;
+      // ss << "iter_field_length: " << iter_field_length << '\n';
+      // ss << "index " << index->table_name << "." << index->name <<  " to insert, shadow key: " << shadow_key << ' ' << ", shadow page no: " << shadow_page_no << '\n';
+      // ss << "direction: " << direction << " page no: " << page_no << '\n';
+      // std::cerr << ss.str();
+    }
+  }
 
   /* If the split is made on the leaf level and the insert will fit
   on the appropriate half-page, we may release the tree x-latch.
@@ -2549,7 +2572,7 @@ func_start:
 
       ut_ad(!dict_index_is_spatial(index));
 
-      btr_search_update_hash_on_move(new_block, block, cursor->index);
+      // btr_search_update_hash_on_move(new_block, block, cursor->index);
 
       /* Delete the records from the source page. */
 
@@ -2559,6 +2582,20 @@ func_start:
 
     left_block = block;
     right_block = new_block;
+
+    if (page_is_leaf(page) && !index->disable_ahi && btr_search_enabled && index->shadow.IsApplicable() && index->shadow.IsShadowBuild()) {
+      index->shadow.InsertKeyLeaf(shadow_key, shadow_page_no);
+
+      if (btr_page_get_prev(page, mtr) == FIL_NULL) {
+        // Update leftmost leaf node
+        auto page_first_rec = page_rec_get_next(page_get_infimum_rec(page));
+
+        ulint key = shadow::GetRecordKey(index, page_first_rec);
+        uint32_t page_no = page_get_page_no(page);
+
+        index->shadow.UpdateLeftmostKeyLeaf(key, page_no);
+      }
+    }
 
     if (!dict_table_is_locking_disabled(cursor->index->table)) {
       lock_update_split_right(right_block, left_block);
@@ -3153,6 +3190,22 @@ retry:
                                           offsets, &new_mbr);
     }
 
+    bool delete_shadow_key = false;
+    ulint shadow_key = 0;
+
+    // Get shadow key before the page got merged
+    if (page_is_leaf(page) && !index->disable_ahi && btr_search_enabled && index->shadow.IsApplicable() && index->shadow.IsShadowBuild()) {
+      btr_cur_t cursor;
+      btr_page_get_father(index, block, mtr, &cursor);
+      auto page_first_rec = btr_cur_get_rec(&cursor);
+      
+      if (!page_rec_is_supremum(page_first_rec)) {
+        delete_shadow_key = true;
+
+        shadow_key = shadow::GetRecordKey(index, page_first_rec);
+      }
+    }
+
     rec_t *orig_pred = page_copy_rec_list_start(
         merge_block, block, page_get_supremum_rec(page), index, mtr);
 
@@ -3197,6 +3250,13 @@ retry:
       lock_prdt_page_free_from_discard(block, lock_sys->prdt_page_hash);
       lock_rec_free_all_from_discard_page(block);
     } else {
+      if (delete_shadow_key) {
+        // std::stringstream ss;
+        // ss << "Delete shadow key: " << shadow_key << " page: " << page_get_page_no(page) << '\n';
+        // std::cerr << ss.str();
+        index->shadow.DeleteKey(shadow_key);
+      }
+
       btr_node_ptr_delete(index, block, mtr);
       if (!dict_table_is_locking_disabled(index->table)) {
         lock_update_merge_left(merge_block, orig_pred, block);
@@ -3236,6 +3296,25 @@ retry:
       cursor2.tree_height = cursor->tree_height;
     } else {
       btr_page_get_father(index, merge_block, mtr, &cursor2);
+    }
+
+    bool update_shadow = false;
+    ulint left_shadow_key = 0;
+    ulint right_shadow_key = 0;
+    page_no_t merge_shadow_page_no = right_page_no;
+
+    // Get shadow key before the page got merged
+    if (page_is_leaf(page) && !index->disable_ahi && btr_search_enabled && index->shadow.IsApplicable() && index->shadow.IsShadowBuild()) {
+      auto page_first_rec = btr_cur_get_rec(&father_cursor);
+      
+      if (!page_rec_is_supremum(page_first_rec)) {
+        update_shadow = true;
+
+        left_shadow_key = shadow::GetRecordKey(index, page_first_rec);
+
+        page_first_rec = btr_cur_get_rec(&cursor2);
+        right_shadow_key = shadow::GetRecordKey(index, page_first_rec);
+      }
     }
 
     if (merge_page_zip && left_page_no == FIL_NULL) {
@@ -3284,6 +3363,17 @@ retry:
 
     ut_ad(btr_node_ptr_get_child_page_no(btr_cur_get_rec(&father_cursor),
                                          offsets) == block->page.id.page_no());
+
+    if (update_shadow) {
+      // std::stringstream ss;
+      // ss << "Update shadow key: " << left_shadow_key << " to page: " << merge_shadow_page_no << ", delete shadow key: " << right_shadow_key << '\n';
+      // std::cerr << ss.str();
+      index->shadow.UpdateKeyLeaf(left_shadow_key, merge_shadow_page_no);
+      index->shadow.DeleteKey(right_shadow_key);
+      if (left_page_no == FIL_NULL) {
+        index->shadow.UpdateLeftmostKeyLeaf(left_shadow_key, merge_shadow_page_no);
+      }
+    }
 
     /* Replace the address of the old child node (= page) with the
     address of the merge page to the right */

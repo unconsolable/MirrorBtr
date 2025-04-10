@@ -53,8 +53,13 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "btr0cur.h"
 
 #include <assert.h>
+#include <cstdint>
+#include <iostream>
+#include <mutex>
+// #include <sstream>
 
 #include "my_dbug.h"
+#include "shadow/shadow_helper.h"
 
 #ifndef UNIV_HOTBACKUP
 #include <zlib.h>
@@ -92,8 +97,20 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "trx0rec.h"
 #include "trx0roll.h"
 #endif /* !UNIV_HOTBACKUP */
+#include "page0cur.h"
 
 #include <array>
+#include "btr/shadow/shadow.h"
+#include <byteswap.h>
+
+// thread_local int64_t shadow_lookup_ns = 0;
+// thread_local int64_t shadow_lookup_cnt = 0;
+
+// inline int64_t GetNowUs() {
+//   timespec now;
+//   clock_gettime(CLOCK_MONOTONIC, &now);
+//   return now.tv_sec * 1000000000 + now.tv_nsec;
+// }
 
 /** Buffered B-tree operation types, introduced as part of delete buffering. */
 enum btr_op_t {
@@ -772,8 +789,7 @@ void btr_cur_search_to_nth_level(
 #endif
   /* Use of AHI is disabled for intrinsic table as these tables re-use
   the index-id and AHI validation is based on index-id. */
-  if (rw_lock_get_writer(btr_get_search_latch(index)) == RW_LOCK_NOT_LOCKED &&
-      latch_mode <= BTR_MODIFY_LEAF && index->search_info->last_hash_succ &&
+  if (latch_mode <= BTR_MODIFY_LEAF &&
       !index->disable_ahi && !estimate
 #ifdef PAGE_CUR_LE_OR_EXTENDS
       && mode != PAGE_CUR_LE_OR_EXTENDS
@@ -782,18 +798,127 @@ void btr_cur_search_to_nth_level(
       /* If !has_search_latch, we do a dirty read of
       btr_search_enabled below, and btr_search_guess_on_hash()
       will have to check it again. */
-      && UNIV_LIKELY(btr_search_enabled) && !modify_external &&
-      btr_search_guess_on_hash(tuple, mode, latch_mode, cursor,
-                               has_search_latch, mtr)) {
+      && UNIV_LIKELY(btr_search_enabled) && !modify_external
+      // Key can only have 1 field
+      && index->shadow.IsApplicable()) {
 
-    /* Search using the hash index succeeded */
+    // If the shadow is not built, build on it
+    if (!index->shadow.IsShadowBuild()) {
+      auto &build_mutex = index->shadow.BuildMutex();
+      std::unique_lock lock(build_mutex);
 
-    ut_ad(cursor->up_match != ULINT_UNDEFINED || mode != PAGE_CUR_GE);
-    ut_ad(cursor->up_match != ULINT_UNDEFINED || mode != PAGE_CUR_LE);
-    ut_ad(cursor->low_match != ULINT_UNDEFINED || mode != PAGE_CUR_LE);
-    btr_cur_n_sea++;
+      if (index->shadow.IsApplicable() && !index->shadow.IsShadowBuild()) {
+        const uint16_t n_unique =
+          static_cast<uint16_t>(dict_index_get_n_unique_in_tree(index));
+        if (n_unique != 1) {
+          index->shadow.SetApplicable(false);
+        } else {
+          mtr_t iter_mtr;
+          mtr_start(&iter_mtr);
+          mtr_sx_lock(dict_index_get_lock(index), &iter_mtr, UT_LOCATION_HERE);
 
-    return;
+          ulint root_level = btr_height_get(index, &iter_mtr);
+
+          // only support height > 1
+          if (root_level == 0) {
+            index->shadow.SetApplicable(false);
+          } else {
+            // iterate on leaf nodes, to get the <min_key, page id> pairs
+            btr_pcur_t pcur;
+            pcur.open_at_side(true, index, BTR_SEARCH_TREE | BTR_ALREADY_S_LATCHED, true, 1, &iter_mtr);
+            
+            Rec_offsets iter_rec_offsets;
+            const byte *iter_field_data;
+            ulint iter_field_length;
+            dberr_t iter_err = DB_SUCCESS;
+            std::vector<std::pair<ulint, page_no_t>> key_page_pairs;
+
+            while (iter_err == DB_SUCCESS) {
+              if (pcur.is_before_first_on_page()) {
+                pcur.move_to_next_on_page();
+              }
+              rec_t *rec = pcur.get_rec();
+              
+              // get record key
+              const ulint *iter_offsets = iter_rec_offsets.compute(rec, index);
+              iter_field_data = rec_get_nth_field_instant(rec, iter_offsets, 0, index, &iter_field_length);
+              ulint key;
+              uint32_t page_no;
+              if (iter_field_length == 8) {
+                uint64_t big_endian_key = *(ulint *)(iter_field_data);
+                key = bswap_64(big_endian_key);
+                page_no = btr_node_ptr_get_child_page_no(rec, iter_offsets);
+              } else if (iter_field_length == 4) {
+                uint32_t big_endian_key = *(uint32_t *)(iter_field_data);
+                key = bswap_32(big_endian_key);
+                page_no = btr_node_ptr_get_child_page_no(rec, iter_offsets);
+              } else {
+                index->shadow.SetApplicable(false);
+                break;
+              }
+              
+              key_page_pairs.emplace_back(key, page_no);
+              iter_err = pcur.move_to_next_user_rec(&iter_mtr);
+            }
+            // release the last inner page lock
+            btr_leaf_page_release(pcur.get_block(), BTR_SEARCH_LEAF, &iter_mtr);
+            pcur.close();
+
+            {
+              // Get the minimum key on the tree, sometime the minimum key from parent is wrong.
+              pcur.begin_leaf(index, BTR_SEARCH_TREE | BTR_ALREADY_S_LATCHED, &iter_mtr);
+              if (pcur.is_before_first_on_page()) {
+                pcur.move_to_next_on_page();
+              }
+              rec_t *rec = pcur.get_rec();
+
+              // get record key
+              const ulint *iter_offsets = iter_rec_offsets.compute(rec, index);
+              iter_field_data = rec_get_nth_field_instant(rec, iter_offsets, 0, index, &iter_field_length);
+              ulint key;
+              if (iter_field_length == 8) {
+                uint64_t big_endian_key = *(ulint *)(iter_field_data);
+                key = bswap_64(big_endian_key);
+              } else if (iter_field_length == 4) {
+                uint32_t big_endian_key = *(uint32_t *)(iter_field_data);
+                key = bswap_32(big_endian_key);
+              } else {
+                assert(false);
+                __builtin_unreachable();
+              }
+              
+              if (key_page_pairs[0].first != key) {
+                std::cerr << "Update first key: " << key_page_pairs[0].first << " to " << key << '\n';
+                key_page_pairs[0].first = key;
+              }
+              pcur.close();
+            }
+
+            // iterate finish
+            if (index->shadow.IsApplicable()) {
+              // std::stringstream ss;
+              // ss << "Build shadow on " << index->table_name << "." << index->name << '\n';
+              // for (uint64_t i = 0; i < key_page_pairs.size(); i++) {
+              //   ss << key_page_pairs[i].first << " " << key_page_pairs[i].second << '\n';
+              // }
+              // std::cerr << ss.str();
+              index->shadow.BuildShadow(key_page_pairs.data(), key_page_pairs.size());
+              index->shadow.PrintStat();
+            }
+          }
+
+          mtr_memo_release(&iter_mtr, dict_index_get_lock(index), MTR_MEMO_SX_LOCK);
+          mtr_commit(&iter_mtr);
+        }
+      }
+    }
+
+    // ut_ad(cursor->up_match != ULINT_UNDEFINED || mode != PAGE_CUR_GE);
+    // ut_ad(cursor->up_match != ULINT_UNDEFINED || mode != PAGE_CUR_LE);
+    // ut_ad(cursor->low_match != ULINT_UNDEFINED || mode != PAGE_CUR_LE);
+    // btr_cur_n_sea++;
+
+    // return;
   }
   btr_cur_n_non_sea++;
   DBUG_EXECUTE_IF("non_ahi_search",
@@ -802,10 +927,135 @@ void btr_cur_search_to_nth_level(
   /* If the hash search did not succeed, do binary search down the
   tree */
 
-  if (has_search_latch) {
-    /* Release possible search latch to obey latching order */
-    rw_lock_s_unlock(btr_get_search_latch(index));
+
+  if (latch_mode <= BTR_MODIFY_LEAF &&
+      !index->disable_ahi && !estimate
+#ifdef PAGE_CUR_LE_OR_EXTENDS
+      && mode != PAGE_CUR_LE_OR_EXTENDS
+#endif /* PAGE_CUR_LE_OR_EXTENDS */
+      && !dict_index_is_spatial(index)
+      /* If !has_search_latch, we do a dirty read of
+      btr_search_enabled below, and btr_search_guess_on_hash()
+      will have to check it again. */
+      && UNIV_LIKELY(btr_search_enabled) && !modify_external
+      // Key can only have 1 field
+      && level == 0 && index->shadow.IsApplicable()) {
+
+    uint64_t key = shadow::GetDtupleKey(tuple);
+
+    // int64_t start_ns = GetNowUs();
+    page_no_t shadow_page_no;
+    page_mode = mode;
+    if (page_mode == PAGE_CUR_L || page_mode == PAGE_CUR_GE) {
+      shadow_page_no = index->shadow.TraverseToLeafL(key);
+    } else {
+      shadow_page_no = index->shadow.TraverseToLeafLE(key);
+    }
+    // int64_t end_ns = GetNowUs();
+    // shadow_lookup_ns += end_ns - start_ns;
+    // shadow_lookup_cnt++;
+    // if (shadow_lookup_cnt == 100000) {
+    //   double thrp = 1.0 * shadow_lookup_cnt / shadow_lookup_ns * 1000;
+    //   std::stringstream ss;
+    //   ss << "thrp: " << thrp << '\n';
+    //   std::cerr << ss.str();
+    //   shadow_lookup_ns = 0;
+    //   shadow_lookup_cnt = 0;
+    // }
+
+    page_cursor = btr_cur_get_page_cur(cursor);
+
+    page_id_t page_id(dict_index_get_space(index), shadow_page_no);
+    const page_size_t page_size(dict_table_page_size(index->table));
+
+    ulint savepoint = mtr_set_savepoint(mtr);
+    block = buf_page_get_gen(
+      page_id, page_size, latch_mode,
+      nullptr, Page_fetch::NORMAL, {file, line}, mtr);
+
+    // Visit last record to determine whether the next page is needed
+    {
+      page_t *page = buf_block_get_frame(block);
+
+      page_no_t next_page_no = btr_page_get_next(page, mtr);
+      while (next_page_no != FIL_NULL) {
+        rec_t *last_user_record = page_rec_get_prev(page_get_supremum_rec(page));
+        offsets = rec_get_offsets(last_user_record, index, offsets, ULINT_UNDEFINED,
+                              UT_LOCATION_HERE, &heap);
+        int cmp = cmp_dtuple_rec(tuple, last_user_record, index, offsets);
+
+        bool need_get_next_page = false;
+        if (page_mode == PAGE_CUR_LE || page_mode == PAGE_CUR_G) {
+          need_get_next_page = cmp >= 0;
+        } else {
+          need_get_next_page = cmp > 0;
+        }
+
+        if (!need_get_next_page) {
+          break;
+        }
+
+        ulint next_page_savepoint = mtr_set_savepoint(mtr);
+        page_id_t next_page_id = page_id_t(dict_index_get_space(index), next_page_no);
+        buf_block_t *next_block = buf_page_get_gen(
+          next_page_id, page_size,
+          latch_mode, nullptr, Page_fetch::NORMAL, {file, line}, mtr);
+        page_t *next_page = buf_block_get_frame(next_block);
+        rec_t *first_user_record_next = page_rec_get_next(page_get_infimum_rec(next_page));
+        offsets2 = rec_get_offsets(first_user_record_next, index, offsets2, ULINT_UNDEFINED,
+                              UT_LOCATION_HERE, &heap);
+
+        bool search_right = false;
+        if (page_mode == PAGE_CUR_G || page_mode == PAGE_CUR_GE) {
+          search_right = true;
+        } else if (page_mode == PAGE_CUR_LE) {
+          search_right = cmp_dtuple_rec(tuple, first_user_record_next, index, offsets2) >= 0;
+        } else {
+          search_right = cmp_dtuple_rec(tuple, first_user_record_next, index, offsets2) > 0;
+        }
+
+        if (search_right) {
+          mtr_release_block_at_savepoint(mtr, savepoint, block);
+          savepoint = next_page_savepoint;
+          page_id = next_page_id;
+          block = next_block;
+          page = next_page;
+          next_page_no = btr_page_get_next(page, mtr);
+        } else {
+          mtr_release_block_at_savepoint(mtr, next_page_savepoint, next_block);
+          break;
+        }
+      }
+    }
+
+    up_match = 0;
+    up_bytes = 0;
+    low_match = 0;
+    low_bytes = 0;
+
+    page_cur_search_with_match_bytes(block, index, tuple, page_mode, &up_match,
+                                     &up_bytes, &low_match, &low_bytes,
+                                     page_cursor);
+    
+    cursor->low_match = low_match;
+    cursor->low_bytes = low_bytes;
+    cursor->up_match = up_match;
+    cursor->up_bytes = up_bytes;
+    ut_ad(cursor->up_match != ULINT_UNDEFINED || mode != PAGE_CUR_GE);
+    ut_ad(cursor->up_match != ULINT_UNDEFINED || mode != PAGE_CUR_LE);
+    ut_ad(cursor->low_match != ULINT_UNDEFINED || mode != PAGE_CUR_LE);
+
+    if (UNIV_LIKELY_NULL(heap)) {
+      mem_heap_free(heap);
+    }
+
+    return;
   }
+
+  // if (has_search_latch) {
+  //   /* Release possible search latch to obey latching order */
+  //   rw_lock_s_unlock(btr_get_search_latch(index));
+  // }
 
   /* Store the position of the tree latch we push to mtr so that we
   know how to release it when we have latched leaf node(s) */
@@ -1653,9 +1903,9 @@ retry_page_get:
     will properly check btr_search_enabled again in
     btr_search_build_page_hash_index() before building a
     page hash index, while holding search latch. */
-    if (btr_search_enabled && !index->disable_ahi) {
-      btr_search_info_update(cursor);
-    }
+    // if (btr_search_enabled && !index->disable_ahi) {
+    //   btr_search_info_update(cursor);
+    // }
     ut_ad(cursor->up_match != ULINT_UNDEFINED || mode != PAGE_CUR_GE);
     ut_ad(cursor->up_match != ULINT_UNDEFINED || mode != PAGE_CUR_LE);
     ut_ad(cursor->low_match != ULINT_UNDEFINED || mode != PAGE_CUR_LE);
@@ -1686,9 +1936,9 @@ func_exit:
     ut::free(prev_tree_savepoints);
   }
 
-  if (has_search_latch) {
-    rw_lock_s_lock(btr_get_search_latch(index), UT_LOCATION_HERE);
-  }
+  // if (has_search_latch) {
+  //   rw_lock_s_lock(btr_get_search_latch(index), UT_LOCATION_HERE);
+  // }
 
   if (mbr_adj) {
     /* remember that we will need to adjust parent MBR */
