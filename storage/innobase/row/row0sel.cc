@@ -4674,7 +4674,7 @@ dberr_t row_search_mvcc(byte *buf, page_cur_mode_t mode,
       hash index semaphore! */
 
       ut_a(!trx->has_search_latch);
-      rw_lock_s_lock(btr_get_search_latch(index), UT_LOCATION_HERE);
+      // rw_lock_s_lock(btr_get_search_latch(index), UT_LOCATION_HERE);
       trx->has_search_latch = true;
 
       switch (row_sel_try_search_shortcut_for_mysql(&rec, prebuilt, &offsets,
@@ -4723,7 +4723,7 @@ dberr_t row_search_mvcc(byte *buf, page_cur_mode_t mode,
 
           err = DB_SUCCESS;
 
-          rw_lock_s_unlock(btr_get_search_latch(index));
+          // rw_lock_s_unlock(btr_get_search_latch(index));
           trx->has_search_latch = false;
 
           goto func_exit;
@@ -4734,7 +4734,7 @@ dberr_t row_search_mvcc(byte *buf, page_cur_mode_t mode,
 
           err = DB_RECORD_NOT_FOUND;
 
-          rw_lock_s_unlock(btr_get_search_latch(index));
+          // rw_lock_s_unlock(btr_get_search_latch(index));
           trx->has_search_latch = false;
 
           /* NOTE that we do NOT store the cursor
@@ -4752,7 +4752,7 @@ dberr_t row_search_mvcc(byte *buf, page_cur_mode_t mode,
       mtr_commit(&mtr);
       mtr_start(&mtr);
 
-      rw_lock_s_unlock(btr_get_search_latch(index));
+      // rw_lock_s_unlock(btr_get_search_latch(index));
       trx->has_search_latch = false;
     }
   }
