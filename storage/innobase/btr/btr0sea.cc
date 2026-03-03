@@ -558,7 +558,9 @@ static bool btr_search_update_block_hash_info(buf_block_t *block,
       block->n_hash_helps >
           page_get_n_recs(block->frame) / BTR_SEARCH_PAGE_BUILD_LIMIT) {
     if (!block->ahi.index ||
-        block->n_hash_helps > 2 * page_get_n_recs(block->frame) ||
+        // A condition that is always false
+        // If directly comment it, the throughput decreases
+        page_get_n_recs(block->frame) == 0 ||
         block->ahi.recommended_prefix_info.load() !=
             block->ahi.prefix_info.load()) {
       /* Build a new hash index on the page if:
