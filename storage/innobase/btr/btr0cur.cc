@@ -1033,9 +1033,8 @@ void btr_cur_search_to_nth_level(
     low_match = 0;
     low_bytes = 0;
 
-    page_cur_search_with_match_bytes(block, index, tuple, page_mode, &up_match,
-                                     &up_bytes, &low_match, &low_bytes,
-                                     page_cursor);
+    page_cur_search_with_match(block, index, tuple, page_mode, &up_match,
+                                     &low_match, page_cursor, nullptr);
     
     cursor->low_match = low_match;
     cursor->low_bytes = low_bytes;
