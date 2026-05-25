@@ -2451,9 +2451,10 @@ func_start:
   btr_attach_half_pages(flags, cursor->index, block, first_rec, new_block,
                         direction, mtr);
 
+#if 0  /* [main-im] Disable tree-level shadow split maintenance */
   ulint shadow_key = 0;
   page_no_t shadow_page_no = 0;
-  
+
   // calculate `shadow_key` and `shadow_page_no` here, otherwise `first_rec` may be an invalid record.
   if (page_is_leaf(page) && !index->disable_ahi && btr_search_enabled && index->shadow.IsApplicable() && index->shadow.IsShadowBuild()) {
     // new page may only has infimum & supremum records.
@@ -2470,6 +2471,7 @@ func_start:
       // std::cerr << ss.str();
     }
   }
+#endif /* [main-im] Disable tree-level shadow split maintenance */
 
   /* If the split is made on the leaf level and the insert will fit
   on the appropriate half-page, we may release the tree x-latch.
@@ -2583,6 +2585,7 @@ func_start:
     left_block = block;
     right_block = new_block;
 
+#if 0  /* [main-im] Disable tree-level shadow split insert */
     if (page_is_leaf(page) && !index->disable_ahi && btr_search_enabled && index->shadow.IsApplicable() && index->shadow.IsShadowBuild()) {
       index->shadow.InsertKeyLeaf(shadow_key, shadow_page_no);
 
@@ -2596,6 +2599,7 @@ func_start:
         index->shadow.UpdateLeftmostKeyLeaf(key, page_no);
       }
     }
+#endif /* [main-im] Disable tree-level shadow split insert */
 
     if (!dict_table_is_locking_disabled(cursor->index->table)) {
       lock_update_split_right(right_block, left_block);
@@ -3200,6 +3204,7 @@ retry:
                                           offsets, &new_mbr);
     }
 
+#if 0  /* [main-im] Disable tree-level shadow merge maintenance */
     bool delete_shadow_key = false;
     ulint shadow_key = 0;
 
@@ -3208,13 +3213,14 @@ retry:
       btr_cur_t cursor;
       btr_page_get_father(index, block, mtr, &cursor);
       auto page_first_rec = btr_cur_get_rec(&cursor);
-      
+
       if (!page_rec_is_supremum(page_first_rec)) {
         delete_shadow_key = true;
 
         shadow_key = shadow::GetRecordKey(index, page_first_rec);
       }
     }
+#endif /* [main-im] Disable tree-level shadow merge maintenance */
 
     rec_t *orig_pred = page_copy_rec_list_start(
         merge_block, block, page_get_supremum_rec(page), index, mtr);
@@ -3260,12 +3266,14 @@ retry:
       lock_prdt_page_free_from_discard(block, lock_sys->prdt_page_hash);
       lock_rec_free_all_from_discard_page(block);
     } else {
+#if 0  /* [main-im] Disable tree-level shadow merge delete */
       if (delete_shadow_key) {
         // std::stringstream ss;
         // ss << "Delete shadow key: " << shadow_key << " page: " << page_get_page_no(page) << '\n';
         // std::cerr << ss.str();
         index->shadow.DeleteKey(shadow_key);
       }
+#endif /* [main-im] Disable tree-level shadow merge delete */
 
       btr_node_ptr_delete(index, block, mtr);
       if (!dict_table_is_locking_disabled(index->table)) {

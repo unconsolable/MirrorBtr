@@ -789,15 +789,45 @@ void btr_cur_search_to_nth_level(
 #endif
   /* Use of AHI is disabled for intrinsic table as these tables re-use
   the index-id and AHI validation is based on index-id. */
+  /* [main-im] Applicability check: disable page-level linear model for unsupported indexes.
+     Reuses IsShadowBuild() as "check done" flag since tree-level shadow build is disabled. */
   if (latch_mode <= BTR_MODIFY_LEAF &&
       !index->disable_ahi && !estimate
 #ifdef PAGE_CUR_LE_OR_EXTENDS
       && mode != PAGE_CUR_LE_OR_EXTENDS
 #endif /* PAGE_CUR_LE_OR_EXTENDS */
       && !dict_index_is_spatial(index)
-      /* If !has_search_latch, we do a dirty read of
-      btr_search_enabled below, and btr_search_guess_on_hash()
-      will have to check it again. */
+      && UNIV_LIKELY(btr_search_enabled) && !modify_external
+      && index->shadow.IsApplicable()
+      && !index->shadow.IsShadowBuild()) {
+    auto &build_mutex = index->shadow.BuildMutex();
+    std::unique_lock lock(build_mutex);
+    if (index->shadow.IsApplicable() && !index->shadow.IsShadowBuild()) {
+      const uint16_t n_unique =
+        static_cast<uint16_t>(dict_index_get_n_unique_in_tree(index));
+      if (n_unique != 1) {
+        index->shadow.SetApplicable(false);
+      } else {
+        mtr_t iter_mtr;
+        mtr_start(&iter_mtr);
+        mtr_sx_lock(dict_index_get_lock(index), &iter_mtr, UT_LOCATION_HERE);
+        ulint root_level = btr_height_get(index, &iter_mtr);
+        if (root_level == 0) {
+          index->shadow.SetApplicable(false);
+        }
+        mtr_memo_release(&iter_mtr, dict_index_get_lock(index), MTR_MEMO_SX_LOCK);
+        mtr_commit(&iter_mtr);
+      }
+      index->shadow.MarkShadowBuild();
+    }
+  }
+#if 0  /* [main-im] Disable tree-level shadow (ALEX) build, keep page-level linear model only */
+  if (latch_mode <= BTR_MODIFY_LEAF &&
+      !index->disable_ahi && !estimate
+#ifdef PAGE_CUR_LE_OR_EXTENDS
+      && mode != PAGE_CUR_LE_OR_EXTENDS
+#endif /* PAGE_CUR_LE_OR_EXTENDS */
+      && !dict_index_is_spatial(index)
       && UNIV_LIKELY(btr_search_enabled) && !modify_external
       && index->shadow.IsApplicable()) {
 
@@ -810,6 +840,7 @@ void btr_cur_search_to_nth_level(
 
     // return;
   }
+#endif /* [main-im] Disable tree-level shadow build */
   btr_cur_n_non_sea++;
   DBUG_EXECUTE_IF("non_ahi_search",
                   assert(!strcmp(index->table->name.m_name, "test/t1")););
@@ -818,6 +849,7 @@ void btr_cur_search_to_nth_level(
   tree */
 
 
+#if 0  /* [main-im] Disable tree-level shadow (ALEX) query, keep page-level linear model only */
   if (latch_mode <= BTR_MODIFY_LEAF &&
       !index->disable_ahi && !estimate
 #ifdef PAGE_CUR_LE_OR_EXTENDS
@@ -925,7 +957,7 @@ void btr_cur_search_to_nth_level(
     page_cur_search_with_match_bytes(block, index, tuple, page_mode, &up_match,
                                      &up_bytes, &low_match, &low_bytes,
                                      page_cursor);
-    
+
     cursor->low_match = low_match;
     cursor->low_bytes = low_bytes;
     cursor->up_match = up_match;
@@ -940,6 +972,7 @@ void btr_cur_search_to_nth_level(
 
     return;
   }
+#endif /* [main-im] Disable tree-level shadow query */
 
   // if (has_search_latch) {
   //   /* Release possible search latch to obey latching order */
@@ -2195,16 +2228,15 @@ void btr_cur_open_at_index_side(bool from_left, dict_index_t *index,
       page_cur_set_after_last(block, page_cursor);
     }
 
-    /* Ensure shadow is initialized, then build linear model for leaf pages.
-       build_linear_model=false is passed from BtrEnsureShadow to avoid
-       recursion (BtrEnsureShadow uses open_at_side internally). */
-    if (build_linear_model && height == 0 && !index->disable_ahi &&
+    /* Build page-level linear model for all pages (leaf + internal).
+       Skip ALEX tree construction (BtrEnsureShadow) — only the per-page
+       linear model is used; the tree-level learned index is disabled. */
+    if (build_linear_model && !index->disable_ahi &&
         btr_search_enabled && index->shadow.IsApplicable() &&
-        !block->model.build_) {
-      if (shadow::BtrEnsureShadow(index) &&
-          page_dir_get_n_slots(buf_block_get_frame(block)) > 2) {
-        shadow::BuildLinearModel(block, index, buf_block_get_frame(block));
-      }
+        !block->model.build_ &&
+        shadow::GetCompositeKeyLen(index) > 0 &&
+        page_dir_get_n_slots(buf_block_get_frame(block)) > 2) {
+      shadow::BuildLinearModel(block, index, buf_block_get_frame(block));
     }
 
     if (height == level) {

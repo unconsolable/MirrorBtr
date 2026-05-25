@@ -80,6 +80,10 @@ class Shadow {
 
   std::mutex& BuildMutex() { return build_mu_; }
 
+  /* [main-im] Reused as "applicability checked" flag after tree-level shadow build is disabled.
+     After applicability check completes, set to true via MarkShadowBuild(). */
+  void MarkShadowBuild() { shadow_build_ = true; }
+
  private:
   bool shadow_build_{false};
   bool is_applicable_{true};
