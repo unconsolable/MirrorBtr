@@ -704,15 +704,12 @@ void page_cur_search_with_match_bytes(
   up = page_dir_get_n_slots(page) - 1;
 
   if (index->shadow.IsApplicable() && !block->model.build_) {
-    // If up is 1, there are only supremum & infimum records
+    assert(shadow::GetCompositeKeyLen(index) > 0);
     if (up > 1) {
       std::unique_lock lock(block->model.build_mu_);
 
       if (!block->model.build_) {
-        // std::stringstream ss;
-        // ss << "Build leaf node linear model\n";
         shadow::BuildLinearModel(block, index, page);
-        // std::cerr << ss.str();
       }
     }
   }
@@ -752,7 +749,7 @@ void page_cur_search_with_match_bytes(
   slots come to the distance 1 of each other */
 
   if (index->shadow.IsApplicable() && block->model.build_) {
-    uint64_t key = shadow::GetDtupleKey(tuple);
+    uint64_t key = shadow::GetDtupleKey(tuple, index);
 
     double predict_pos = block->model.model_.predict_double(key);
 

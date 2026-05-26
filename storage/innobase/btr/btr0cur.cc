@@ -799,7 +799,6 @@ void btr_cur_search_to_nth_level(
       btr_search_enabled below, and btr_search_guess_on_hash()
       will have to check it again. */
       && UNIV_LIKELY(btr_search_enabled) && !modify_external
-      // Key can only have 1 field
       && index->shadow.IsApplicable()) {
 
     // If the shadow is not built, build on it
@@ -808,9 +807,7 @@ void btr_cur_search_to_nth_level(
       std::unique_lock lock(build_mutex);
 
       if (index->shadow.IsApplicable() && !index->shadow.IsShadowBuild()) {
-        const uint16_t n_unique =
-          static_cast<uint16_t>(dict_index_get_n_unique_in_tree(index));
-        if (n_unique != 1) {
+        if (shadow::GetCompositeKeyLen(index) == 0) {
           index->shadow.SetApplicable(false);
         } else {
           mtr_t iter_mtr;
@@ -828,8 +825,6 @@ void btr_cur_search_to_nth_level(
             pcur.open_at_side(true, index, BTR_SEARCH_TREE | BTR_ALREADY_S_LATCHED, true, 1, &iter_mtr);
             
             Rec_offsets iter_rec_offsets;
-            const byte *iter_field_data;
-            ulint iter_field_length;
             dberr_t iter_err = DB_SUCCESS;
             std::vector<std::pair<ulint, page_no_t>> key_page_pairs;
 
@@ -838,25 +833,12 @@ void btr_cur_search_to_nth_level(
                 pcur.move_to_next_on_page();
               }
               rec_t *rec = pcur.get_rec();
-              
-              // get record key
+
+              // get record key (composite)
+              ulint key = shadow::GetRecordKey(index, rec);
               const ulint *iter_offsets = iter_rec_offsets.compute(rec, index);
-              iter_field_data = rec_get_nth_field_instant(rec, iter_offsets, 0, index, &iter_field_length);
-              ulint key;
-              uint32_t page_no;
-              if (iter_field_length == 8) {
-                uint64_t big_endian_key = *(ulint *)(iter_field_data);
-                key = bswap_64(big_endian_key);
-                page_no = btr_node_ptr_get_child_page_no(rec, iter_offsets);
-              } else if (iter_field_length == 4) {
-                uint32_t big_endian_key = *(uint32_t *)(iter_field_data);
-                key = bswap_32(big_endian_key);
-                page_no = btr_node_ptr_get_child_page_no(rec, iter_offsets);
-              } else {
-                index->shadow.SetApplicable(false);
-                break;
-              }
-              
+              uint32_t page_no = btr_node_ptr_get_child_page_no(rec, iter_offsets);
+
               key_page_pairs.emplace_back(key, page_no);
               iter_err = pcur.move_to_next_user_rec(&iter_mtr);
             }
@@ -872,21 +854,9 @@ void btr_cur_search_to_nth_level(
               }
               rec_t *rec = pcur.get_rec();
 
-              // get record key
-              const ulint *iter_offsets = iter_rec_offsets.compute(rec, index);
-              iter_field_data = rec_get_nth_field_instant(rec, iter_offsets, 0, index, &iter_field_length);
-              ulint key;
-              if (iter_field_length == 8) {
-                uint64_t big_endian_key = *(ulint *)(iter_field_data);
-                key = bswap_64(big_endian_key);
-              } else if (iter_field_length == 4) {
-                uint32_t big_endian_key = *(uint32_t *)(iter_field_data);
-                key = bswap_32(big_endian_key);
-              } else {
-                assert(false);
-                __builtin_unreachable();
-              }
-              
+              // get record key (composite)
+              ulint key = shadow::GetRecordKey(index, rec);
+
               if (key_page_pairs[0].first != key) {
                 std::cerr << "Update first key: " << key_page_pairs[0].first << " to " << key << '\n';
                 key_page_pairs[0].first = key;
@@ -938,10 +908,9 @@ void btr_cur_search_to_nth_level(
       btr_search_enabled below, and btr_search_guess_on_hash()
       will have to check it again. */
       && UNIV_LIKELY(btr_search_enabled) && !modify_external
-      // Key can only have 1 field
       && level == 0 && index->shadow.IsApplicable()) {
 
-    uint64_t key = shadow::GetDtupleKey(tuple);
+    uint64_t key = shadow::GetDtupleKey(tuple, index);
 
     // int64_t start_ns = GetNowUs();
     page_no_t shadow_page_no;

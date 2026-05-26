@@ -1,45 +1,76 @@
 #pragma once
 
 #include <byteswap.h>
+#include "dict0dict.h"
 #include "dict0mem.h"
 #include "rem0rec.h"
 #include "page0page.h"
 
 namespace shadow {
 
-inline ulint GetRecordKey(const dict_index_t *index, const rec_t *rec) {
-  Rec_offsets rec_offsets;
-  const byte *field_data;
-  ulint field_length;
-  const ulint *offsets = rec_offsets.compute(rec, index);
-  field_data = rec_get_nth_field_instant(rec, offsets, 0, index, &field_length);
-
+// Read a fixed-length field as big-endian bytes and return as host-order uint64_t.
+// Caller must ensure 1 <= field_len <= 8.
+inline ulint ReadFieldBE(const byte *data, ulint field_len) {
   ulint key = 0;
-  if (field_length == 8) {
-    uint64_t big_endian_key = *(ulint *)(field_data);
-    key = bswap_64(big_endian_key);
-  } else if (field_length == 4) {
-    uint32_t big_endian_key = *(uint32_t *)(field_data);
-    key = bswap_32(big_endian_key);
+  // Copy bytes into the low bits of key, preserving big-endian order.
+  // InnoDB stores index fields in big-endian, so this preserves sort order.
+  for (ulint i = 0; i < field_len; i++) {
+    key = (key << 8) | data[i];
   }
-
   return key;
 }
 
-inline ulint GetDtupleKey(const dtuple_t *tuple) {
-  const auto dtuple_field = dtuple_get_nth_field(tuple, 0);
-  const auto dtuple_b_ptr =
-      static_cast<const byte *>(dfield_get_data(dtuple_field));
-  auto dtuple_f_len = dfield_get_len(dtuple_field);
-  uint64_t key = 0;
+// Compute the total fixed byte length of the leading n_unique_in_tree fields
+// used as the composite key for the shadow index.  Returns 0 if any of those
+// fields is variable-length or the total exceeds 8 bytes.
+inline ulint GetCompositeKeyLen(const dict_index_t *index) {
+  ulint n_unique = dict_index_get_n_unique_in_tree(index);
+  ulint total = 0;
+  for (ulint i = 0; i < n_unique; i++) {
+    const dict_field_t *field = index->get_field(i);
+    if (field->prefix_len > 0 || field->fixed_len == 0) return 0;
+    total += field->fixed_len;
+  }
+  return total <= 8 ? total : 0;
+}
 
-  ut_ad(dtuple_f_len == 4 || dtuple_f_len == 8);
-  if (dtuple_f_len == 4) {
-    uint32_t big_endian_key = *(uint32_t *)(dtuple_b_ptr);
-    key = bswap_32(big_endian_key);
-  } else if (dtuple_f_len == 8) {
-    uint64_t big_endian_key = *(uint64_t *)(dtuple_b_ptr);
-    key = bswap_64(big_endian_key);
+// Encode the leading n_unique_in_tree fields of a record into a single uint64_t.
+inline ulint GetRecordKey(const dict_index_t *index, const rec_t *rec) {
+  Rec_offsets rec_offsets;
+  const ulint *offsets = rec_offsets.compute(rec, index);
+  ulint n_unique = dict_index_get_n_unique_in_tree(index);
+  ulint key = 0;
+  for (ulint i = 0; i < n_unique; i++) {
+    ulint field_len = 0;
+    const byte *data = rec_get_nth_field_instant(rec, offsets, i, index, &field_len);
+    key = (key << (field_len * 8)) | ReadFieldBE(data, field_len);
+  }
+  return key;
+}
+
+// Encode a dtuple into a single uint64_t using the same key space as GetRecordKey.
+// For secondary indexes, the search tuple may have fewer fields than n_unique_in_tree;
+// missing fields are padded with 0 bytes (minimum value).
+//
+// Example: secondary index k_1(k) with PK (id), query "k BETWEEN 100 AND 200".
+//   - dtuple only has field [k=100], no id (range scan doesn't need a specific id)
+//   - n_unique_in_tree = 2 (k + id), n_tuple = 1
+//   - Encoded key = (100 << 32) | 0 → lands on the first leaf page containing k=100
+inline ulint GetDtupleKey(const dtuple_t *tuple, const dict_index_t *index) {
+  ulint n_tuple = dtuple_get_n_fields(tuple);
+  ulint n_unique = dict_index_get_n_unique_in_tree(index);
+  ulint key = 0;
+  for (ulint i = 0; i < n_unique; i++) {
+    if (i < n_tuple) {
+      const dfield_t *field = dtuple_get_nth_field(tuple, i);
+      const byte *data = static_cast<const byte *>(dfield_get_data(field));
+      ulint len = dfield_get_len(field);
+      key = (key << (len * 8)) | ReadFieldBE(data, len);
+    } else {
+      // Pad missing fields with 0 (minimum value for that field position)
+      ulint field_len = index->get_field(i)->fixed_len;
+      key <<= (field_len * 8);
+    }
   }
   return key;
 }
