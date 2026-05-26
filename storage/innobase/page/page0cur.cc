@@ -41,7 +41,6 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "mtr0log.h"
 
 #include <algorithm>
-#include <atomic>
 #include <sstream>
 #include "page0zip.h"
 #include "btr/shadow/shadow_helper.h"
@@ -609,11 +608,14 @@ void page_cur_search_with_match(const buf_block_t *block,
 @param[in,out]  iup_matched_fields      already matched fields in the
 upper limit record
 @param[in,out]  iup_matched_bytes       already matched bytes in the
-first partially matched field in the upper limit record
+first partially matched field in the upper limit record.
+NOTE: not actively updated in the learned index path (kept for API
+compatibility with page_cur_try_search_shortcut_bytes callers).
 @param[in,out]  ilow_matched_fields     already matched fields in the
 lower limit record
 @param[in,out]  ilow_matched_bytes      already matched bytes in the
-first partially matched field in the lower limit record
+first partially matched field in the lower limit record.
+NOTE: not actively updated in the learned index path.
 @param[out]     cursor                  page cursor */
 void page_cur_search_with_match_bytes(
     const buf_block_t *block, const dict_index_t *index, const dtuple_t *tuple,
@@ -632,7 +634,6 @@ void page_cur_search_with_match_bytes(
   ulint low_matched_fields;
   ulint low_matched_bytes;
   ulint cur_matched_fields;
-  ulint cur_matched_bytes;
   int cmp;
 #ifdef UNIV_ZIP_DEBUG
   const page_zip_des_t *page_zip = buf_block_get_page_zip(block);
@@ -756,9 +757,6 @@ void page_cur_search_with_match_bytes(
     ulint n_slots = page_dir_get_n_slots(page) - 1;
     ulint predict_pos_int = predict_pos < 0 ? 0 : std::min(predict_pos, static_cast<double>(n_slots));
     cur_matched_fields = 0;
-    cur_matched_bytes = 0;
-    // std::stringstream ss;
-    // ss << "Lookup " << key << " predict " << predict_pos_int << " up " << up << " low " << low;
 
     slot = page_dir_get_nth_slot(page, predict_pos_int);
     const rec_t *slot_rec = page_dir_slot_get_rec(slot);
@@ -766,13 +764,9 @@ void page_cur_search_with_match_bytes(
     bool is_supremum_record = predict_pos_int == n_slots;
     if (!is_infimum_record && !is_supremum_record) {
       offsets = get_rec_cached_offsets(slot_rec);
-      cmp = cmp_dtuple_rec_with_match_bytes(tuple, slot_rec, index, offsets,
-                                            &cur_matched_fields,
-                                            &cur_matched_bytes);
+      cmp = tuple->compare(slot_rec, index, offsets, &cur_matched_fields);
     }
 
-    // separate the directory into two parts
-    // left side for low, right side for up
     bool on_right_side = false;
 
     if (mode == PAGE_CUR_G || mode == PAGE_CUR_LE) {
@@ -782,23 +776,17 @@ void page_cur_search_with_match_bytes(
     }
 
     if (on_right_side) {
-      // ss << " inf " << is_infimum_record << " sup " << is_supremum_record << " slot key " << slot_key << " update up\n";
-      // Iterate process won't access infimum/supremum record
       up_matched_fields = cur_matched_fields;
-      up_matched_bytes = cur_matched_bytes;
 
       ulint size = predict_pos_int;
       ulint bound = 1;
       while (bound < size) {
         cur_matched_fields = 0;
-        cur_matched_bytes = 0;
-        
+
         slot = page_dir_get_nth_slot(page, predict_pos_int - bound);
         const rec_t * slot_rec = page_dir_slot_get_rec(slot);
         offsets = get_rec_cached_offsets(slot_rec);
-        cmp = cmp_dtuple_rec_with_match_bytes(tuple, slot_rec, index, offsets,
-                                              &cur_matched_fields,
-                                              &cur_matched_bytes);
+        cmp = tuple->compare(slot_rec, index, offsets, &cur_matched_fields);
 
         if (mode == PAGE_CUR_G || mode == PAGE_CUR_LE) {
           on_right_side = cmp < 0;
@@ -808,11 +796,9 @@ void page_cur_search_with_match_bytes(
 
         if (on_right_side) {
           up_matched_fields = cur_matched_fields;
-          up_matched_bytes = cur_matched_bytes;
           bound *= 2;
         } else {
           low_matched_fields = cur_matched_fields;
-          low_matched_bytes = cur_matched_bytes;
           break;
         }
       }
@@ -820,28 +806,21 @@ void page_cur_search_with_match_bytes(
       low = predict_pos_int - std::min(bound, size);
       if (low == 0) {
         low_matched_fields = 0;
-        low_matched_bytes = 0;
       }
 
       up = predict_pos_int - bound / 2;
     } else {
-      // ss << " inf " << is_infimum_record << " sup " << is_supremum_record << " slot key " << slot_key << " update low\n";
-      // Iterate process won't access infimum/supremum record
       low_matched_fields = cur_matched_fields;
-      low_matched_bytes = cur_matched_bytes;
 
       ulint size = n_slots - predict_pos_int;
       ulint bound = 1;
       while (bound < size) {
         cur_matched_fields = 0;
-        cur_matched_bytes = 0;
 
         slot = page_dir_get_nth_slot(page, predict_pos_int + bound);
         const rec_t * slot_rec = page_dir_slot_get_rec(slot);
         offsets = get_rec_cached_offsets(slot_rec);
-        cmp = cmp_dtuple_rec_with_match_bytes(tuple, slot_rec, index, offsets,
-                                              &cur_matched_fields,
-                                              &cur_matched_bytes);
+        cmp = tuple->compare(slot_rec, index, offsets, &cur_matched_fields);
 
         if (mode == PAGE_CUR_G || mode == PAGE_CUR_LE) {
           on_right_side = cmp < 0;
@@ -851,11 +830,9 @@ void page_cur_search_with_match_bytes(
 
         if (!on_right_side) {
           low_matched_fields = cur_matched_fields;
-          low_matched_bytes = cur_matched_bytes;
           bound *= 2;
         } else {
           up_matched_fields = cur_matched_fields;
-          up_matched_bytes = cur_matched_bytes;
           break;
         }
       }
@@ -865,7 +842,6 @@ void page_cur_search_with_match_bytes(
       up = predict_pos_int + std::min(bound, size);
       if (up == n_slots) {
         up_matched_fields = 0;
-        up_matched_bytes = 0;
       }
     }
   }
@@ -875,20 +851,16 @@ void page_cur_search_with_match_bytes(
     slot = page_dir_get_nth_slot(page, mid);
     mid_rec = page_dir_slot_get_rec(slot);
 
-    ut_pair_min(&cur_matched_fields, &cur_matched_bytes, low_matched_fields,
-                low_matched_bytes, up_matched_fields, up_matched_bytes);
+    cur_matched_fields = std::min(low_matched_fields, up_matched_fields);
 
     offsets = get_rec_cached_offsets(mid_rec);
 
-    cmp = cmp_dtuple_rec_with_match_bytes(tuple, mid_rec, index, offsets,
-                                          &cur_matched_fields,
-                                          &cur_matched_bytes);
+    cmp = tuple->compare(mid_rec, index, offsets, &cur_matched_fields);
 
     if (cmp > 0) {
     low_slot_match:
       low = mid;
       low_matched_fields = cur_matched_fields;
-      low_matched_bytes = cur_matched_bytes;
 
     } else if (cmp) {
 #ifdef PAGE_CUR_LE_OR_EXTENDS
@@ -901,7 +873,6 @@ void page_cur_search_with_match_bytes(
     up_slot_match:
       up = mid;
       up_matched_fields = cur_matched_fields;
-      up_matched_bytes = cur_matched_bytes;
 
     } else if (mode == PAGE_CUR_G || mode == PAGE_CUR_LE
 #ifdef PAGE_CUR_LE_OR_EXTENDS
@@ -925,20 +896,16 @@ void page_cur_search_with_match_bytes(
   while (page_rec_get_next_const(low_rec) != up_rec) {
     mid_rec = page_rec_get_next_const(low_rec);
 
-    ut_pair_min(&cur_matched_fields, &cur_matched_bytes, low_matched_fields,
-                low_matched_bytes, up_matched_fields, up_matched_bytes);
+    cur_matched_fields = std::min(low_matched_fields, up_matched_fields);
 
     offsets = get_rec_cached_offsets(mid_rec);
 
-    cmp = cmp_dtuple_rec_with_match_bytes(tuple, mid_rec, index, offsets,
-                                          &cur_matched_fields,
-                                          &cur_matched_bytes);
+    cmp = tuple->compare(mid_rec, index, offsets, &cur_matched_fields);
 
     if (cmp > 0) {
     low_rec_match:
       low_rec = mid_rec;
       low_matched_fields = cur_matched_fields;
-      low_matched_bytes = cur_matched_bytes;
 
     } else if (cmp) {
 #ifdef PAGE_CUR_LE_OR_EXTENDS
@@ -951,7 +918,6 @@ void page_cur_search_with_match_bytes(
     up_rec_match:
       up_rec = mid_rec;
       up_matched_fields = cur_matched_fields;
-      up_matched_bytes = cur_matched_bytes;
     } else if (mode == PAGE_CUR_G || mode == PAGE_CUR_LE
 #ifdef PAGE_CUR_LE_OR_EXTENDS
                || mode == PAGE_CUR_LE_OR_EXTENDS
