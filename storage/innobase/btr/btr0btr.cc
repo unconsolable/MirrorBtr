@@ -2683,6 +2683,16 @@ func_exit:
     ibuf_update_free_bits_for_two_pages_low(left_block, right_block, mtr);
   }
 
+  /* Rebuild linear model for both pages after split */
+  if (page_is_leaf(page) && !cursor->index->disable_ahi &&
+      btr_search_enabled && cursor->index->shadow.IsApplicable() &&
+      cursor->index->shadow.IsShadowBuild()) {
+    shadow::BuildLinearModel(left_block, cursor->index,
+                             buf_block_get_frame(left_block));
+    shadow::BuildLinearModel(right_block, cursor->index,
+                             buf_block_get_frame(right_block));
+  }
+
   MONITOR_INC(MONITOR_INDEX_SPLIT);
 
   ut_ad(page_validate(buf_block_get_frame(left_block), cursor->index));
@@ -3434,6 +3444,13 @@ retry:
         lock_update_merge_right(merge_block, orig_succ, block);
       }
     }
+  }
+
+  /* Rebuild linear model for merged page */
+  if (page_is_leaf(merge_page) && !index->disable_ahi &&
+      btr_search_enabled && index->shadow.IsApplicable() &&
+      index->shadow.IsShadowBuild()) {
+    shadow::BuildLinearModel(merge_block, index, merge_page);
   }
 
   if (!index->is_clustered() && !index->table->is_temporary() &&
