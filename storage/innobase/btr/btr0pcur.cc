@@ -38,6 +38,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "rem0cmp.h"
 #include "trx0trx.h"
 #include "ut0byte.h"
+#include "shadow/shadow_helper.h"
 
 void btr_pcur_t::store_position(mtr_t *mtr) {
   ut_ad(m_pos_state == BTR_PCUR_IS_POSITIONED);
@@ -349,6 +350,16 @@ void btr_pcur_t::move_to_next_page(mtr_t *mtr) {
   btr_leaf_page_release(get_block(), mode, mtr);
 
   page_cur_set_before_first(next_block, get_page_cur());
+
+  /* Build linear model for the new page if not yet built (lazy init).
+     This ensures subsequent searches via _bytes can use the learned index. */
+  auto idx = get_btr_cur()->index;
+  if (page_is_leaf(next_page) && !idx->disable_ahi && btr_search_enabled &&
+      idx->shadow.IsApplicable() && !next_block->model.build_) {
+    if (shadow::BtrEnsureShadow(idx) && page_dir_get_n_slots(next_page) > 2) {
+      shadow::BuildLinearModel(next_block, idx, next_page);
+    }
+  }
 
   ut_d(page_check_dir(next_page));
 }

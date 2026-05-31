@@ -801,87 +801,7 @@ void btr_cur_search_to_nth_level(
       && UNIV_LIKELY(btr_search_enabled) && !modify_external
       && index->shadow.IsApplicable()) {
 
-    // If the shadow is not built, build on it
-    if (!index->shadow.IsShadowBuild()) {
-      auto &build_mutex = index->shadow.BuildMutex();
-      std::unique_lock lock(build_mutex);
-
-      if (index->shadow.IsApplicable() && !index->shadow.IsShadowBuild()) {
-        if (shadow::GetCompositeKeyLen(index) == 0) {
-          index->shadow.SetApplicable(false);
-        } else {
-          mtr_t iter_mtr;
-          mtr_start(&iter_mtr);
-          mtr_sx_lock(dict_index_get_lock(index), &iter_mtr, UT_LOCATION_HERE);
-
-          ulint root_level = btr_height_get(index, &iter_mtr);
-
-          // only support height > 1
-          if (root_level == 0) {
-            index->shadow.SetApplicable(false);
-          } else {
-            // iterate on leaf nodes, to get the <min_key, page id> pairs
-            btr_pcur_t pcur;
-            pcur.open_at_side(true, index, BTR_SEARCH_TREE | BTR_ALREADY_S_LATCHED, true, 1, &iter_mtr);
-            
-            Rec_offsets iter_rec_offsets;
-            dberr_t iter_err = DB_SUCCESS;
-            std::vector<std::pair<ulint, page_no_t>> key_page_pairs;
-
-            while (iter_err == DB_SUCCESS) {
-              if (pcur.is_before_first_on_page()) {
-                pcur.move_to_next_on_page();
-              }
-              rec_t *rec = pcur.get_rec();
-
-              // get record key (composite)
-              ulint key = shadow::GetRecordKey(index, rec);
-              const ulint *iter_offsets = iter_rec_offsets.compute(rec, index);
-              uint32_t page_no = btr_node_ptr_get_child_page_no(rec, iter_offsets);
-
-              key_page_pairs.emplace_back(key, page_no);
-              iter_err = pcur.move_to_next_user_rec(&iter_mtr);
-            }
-            // release the last inner page lock
-            btr_leaf_page_release(pcur.get_block(), BTR_SEARCH_LEAF, &iter_mtr);
-            pcur.close();
-
-            {
-              // Get the minimum key on the tree, sometime the minimum key from parent is wrong.
-              pcur.begin_leaf(index, BTR_SEARCH_TREE | BTR_ALREADY_S_LATCHED, &iter_mtr);
-              if (pcur.is_before_first_on_page()) {
-                pcur.move_to_next_on_page();
-              }
-              rec_t *rec = pcur.get_rec();
-
-              // get record key (composite)
-              ulint key = shadow::GetRecordKey(index, rec);
-
-              if (key_page_pairs[0].first != key) {
-                std::cerr << "Update first key: " << key_page_pairs[0].first << " to " << key << '\n';
-                key_page_pairs[0].first = key;
-              }
-              pcur.close();
-            }
-
-            // iterate finish
-            if (index->shadow.IsApplicable()) {
-              // std::stringstream ss;
-              // ss << "Build shadow on " << index->table_name << "." << index->name << '\n';
-              // for (uint64_t i = 0; i < key_page_pairs.size(); i++) {
-              //   ss << key_page_pairs[i].first << " " << key_page_pairs[i].second << '\n';
-              // }
-              // std::cerr << ss.str();
-              index->shadow.BuildShadow(key_page_pairs.data(), key_page_pairs.size());
-              index->shadow.PrintStat();
-            }
-          }
-
-          mtr_memo_release(&iter_mtr, dict_index_get_lock(index), MTR_MEMO_SX_LOCK);
-          mtr_commit(&iter_mtr);
-        }
-      }
-    }
+    shadow::BtrEnsureShadow(index);
 
     // ut_ad(cursor->up_match != ULINT_UNDEFINED || mode != PAGE_CUR_GE);
     // ut_ad(cursor->up_match != ULINT_UNDEFINED || mode != PAGE_CUR_LE);
@@ -2070,7 +1990,7 @@ void btr_cur_search_to_nth_level_with_no_latch(dict_index_t *index, ulint level,
 void btr_cur_open_at_index_side(bool from_left, dict_index_t *index,
                                 ulint latch_mode, btr_cur_t *cursor,
                                 ulint level, ut::Location location,
-                                mtr_t *mtr) {
+                                mtr_t *mtr, bool build_linear_model) {
   page_cur_t *page_cursor;
   ulint node_ptr_max_size = UNIV_PAGE_SIZE / 2;
   ulint height;
@@ -2273,6 +2193,18 @@ void btr_cur_open_at_index_side(bool from_left, dict_index_t *index,
       page_cur_set_before_first(block, page_cursor);
     } else {
       page_cur_set_after_last(block, page_cursor);
+    }
+
+    /* Ensure shadow is initialized, then build linear model for leaf pages.
+       build_linear_model=false is passed from BtrEnsureShadow to avoid
+       recursion (BtrEnsureShadow uses open_at_side internally). */
+    if (build_linear_model && height == 0 && !index->disable_ahi &&
+        btr_search_enabled && index->shadow.IsApplicable() &&
+        !block->model.build_) {
+      if (shadow::BtrEnsureShadow(index) &&
+          page_dir_get_n_slots(buf_block_get_frame(block)) > 2) {
+        shadow::BuildLinearModel(block, index, buf_block_get_frame(block));
+      }
     }
 
     if (height == level) {

@@ -197,7 +197,8 @@ end
 @param[in,out] mtr Mini-transaction */
 void btr_cur_open_at_index_side(bool from_left, dict_index_t *index,
                                 ulint latch_mode, btr_cur_t *cursor,
-                                ulint level, ut::Location location, mtr_t *mtr);
+                                ulint level, ut::Location location, mtr_t *mtr,
+                                bool build_linear_model = true);
 
 /** Opens a cursor at either end of an index.
 Avoid taking latches on buffer, just pin (by incrementing fix_count)
