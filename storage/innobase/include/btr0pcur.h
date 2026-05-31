@@ -124,7 +124,8 @@ struct btr_pcur_t {
   @param[in]        level                   Level to search for (0=leaf).
   @param[in,out]        mtr                   Mini-transaction */
   void open_at_side(bool from_left, dict_index_t *index, ulint latch_mode,
-                    bool init_pcur, ulint level, mtr_t *mtr);
+                    bool init_pcur, ulint level, mtr_t *mtr,
+                    bool build_linear_model = true);
 
   /** Opens a persistent cursor at first leaf page (low end). It will not call
   init().
@@ -551,7 +552,8 @@ inline void btr_pcur_t::open(dict_index_t *index, ulint level,
 
 inline void btr_pcur_t::open_at_side(bool from_left, dict_index_t *index,
                                      ulint latch_mode, bool init_pcur,
-                                     ulint level, mtr_t *mtr) {
+                                     ulint level, mtr_t *mtr,
+                                     bool build_linear_model) {
   m_latch_mode = BTR_LATCH_MODE_WITHOUT_FLAGS(latch_mode);
 
   m_search_mode = from_left ? PAGE_CUR_G : PAGE_CUR_L;
@@ -565,7 +567,7 @@ inline void btr_pcur_t::open_at_side(bool from_left, dict_index_t *index,
                                              level, UT_LOCATION_HERE, mtr);
   } else {
     btr_cur_open_at_index_side(from_left, index, latch_mode, get_btr_cur(),
-                               level, UT_LOCATION_HERE, mtr);
+                               level, UT_LOCATION_HERE, mtr, build_linear_model);
   }
 
   m_pos_state = BTR_PCUR_IS_POSITIONED;

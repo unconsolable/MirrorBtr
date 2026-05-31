@@ -610,7 +610,7 @@ upper limit record
 @param[in,out]  iup_matched_bytes       already matched bytes in the
 first partially matched field in the upper limit record.
 NOTE: not actively updated in the learned index path (kept for API
-compatibility with page_cur_try_search_shortcut_bytes callers).
+compatibility with outside callers).
 @param[in,out]  ilow_matched_fields     already matched fields in the
 lower limit record
 @param[in,out]  ilow_matched_bytes      already matched bytes in the
@@ -662,17 +662,16 @@ void page_cur_search_with_match_bytes(
   ut_d(page_check_dir(page));
 
 #ifdef PAGE_CUR_ADAPT
-  // Disable it to gain lower latnecy
-  // if (page_is_leaf(page) && (mode == PAGE_CUR_LE) &&
-  //     (page_header_get_field(page, PAGE_N_DIRECTION) > 3) &&
-  //     (page_header_get_ptr(page, PAGE_LAST_INSERT)) &&
-  //     (page_header_get_field(page, PAGE_DIRECTION) == PAGE_RIGHT)) {
-  //   if (page_cur_try_search_shortcut_bytes(
-  //           block, index, tuple, iup_matched_fields, iup_matched_bytes,
-  //           ilow_matched_fields, ilow_matched_bytes, cursor)) {
-  //     return;
-  //   }
-  // }
+  if (page_is_leaf(page) && (mode == PAGE_CUR_LE) &&
+      (page_header_get_field(page, PAGE_N_DIRECTION) > 3) &&
+      (page_header_get_ptr(page, PAGE_LAST_INSERT)) &&
+      (page_header_get_field(page, PAGE_DIRECTION) == PAGE_RIGHT)) {
+    if (page_cur_try_search_shortcut(
+            block, index, tuple, iup_matched_fields,
+            ilow_matched_fields, cursor)) {
+      return;
+    }
+  }
 #ifdef PAGE_CUR_DBG
   if (mode == PAGE_CUR_DBG) {
     mode = PAGE_CUR_LE;
