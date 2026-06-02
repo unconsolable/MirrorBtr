@@ -922,9 +922,8 @@ void btr_cur_search_to_nth_level(
     low_match = 0;
     low_bytes = 0;
 
-    page_cur_search_with_match_bytes(block, index, tuple, page_mode, &up_match,
-                                     &up_bytes, &low_match, &low_bytes,
-                                     page_cursor);
+    page_cur_search_with_match(block, index, tuple, page_mode, &up_match,
+                                     &low_match, page_cursor, nullptr);
     
     cursor->low_match = low_match;
     cursor->low_bytes = low_bytes;
@@ -2198,14 +2197,14 @@ void btr_cur_open_at_index_side(bool from_left, dict_index_t *index,
     /* Ensure shadow is initialized, then build linear model for leaf pages.
        build_linear_model=false is passed from BtrEnsureShadow to avoid
        recursion (BtrEnsureShadow uses open_at_side internally). */
-    if (build_linear_model && height == 0 && !index->disable_ahi &&
-        btr_search_enabled && index->shadow.IsApplicable() &&
-        !block->model.build_) {
-      if (shadow::BtrEnsureShadow(index) &&
-          page_dir_get_n_slots(buf_block_get_frame(block)) > 2) {
-        shadow::BuildLinearModel(block, index, buf_block_get_frame(block));
-      }
-    }
+    // if (build_linear_model && height == 0 && !index->disable_ahi &&
+    //     btr_search_enabled && index->shadow.IsApplicable() &&
+    //     !block->model.build_) {
+    //   if (shadow::BtrEnsureShadow(index) &&
+    //       page_dir_get_n_slots(buf_block_get_frame(block)) > 2) {
+    //     shadow::BuildLinearModel(block, index, buf_block_get_frame(block));
+    //   }
+    // }
 
     if (height == level) {
       if (estimate) {

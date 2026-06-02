@@ -704,16 +704,16 @@ void page_cur_search_with_match_bytes(
   low = 0;
   up = page_dir_get_n_slots(page) - 1;
 
-  if (index->shadow.IsApplicable() && !block->model.build_) {
-    assert(shadow::GetCompositeKeyLen(index) > 0);
-    if (up > 1) {
-      std::unique_lock lock(block->model.build_mu_);
+  // if (index->shadow.IsApplicable() && !block->model.build_) {
+  //   assert(shadow::GetCompositeKeyLen(index) > 0);
+  //   if (up > 1) {
+  //     std::unique_lock lock(block->model.build_mu_);
 
-      if (!block->model.build_) {
-        shadow::BuildLinearModel(block, index, page);
-      }
-    }
-  }
+  //     if (!block->model.build_) {
+  //       shadow::BuildLinearModel(block, index, page);
+  //     }
+  //   }
+  // }
 
   const ulint *const cached_offsets{index->rec_cache.offsets};
   auto get_rec_cached_offsets = [&](const rec_t *rec) -> const auto * {
@@ -1537,9 +1537,9 @@ rec_t *page_cur_insert_rec_low(
     if (UNIV_UNLIKELY(n_owned == PAGE_DIR_SLOT_MAX_N_OWNED)) {
       page_dir_split_slot(page, nullptr, page_dir_find_owner_slot(owner_rec));
 
-      if (index->shadow.IsApplicable() && block->model.build_) {
-        shadow::BuildLinearModel(block, index, page);
-      }
+      // if (index->shadow.IsApplicable() && block->model.build_) {
+      //   shadow::BuildLinearModel(block, index, page);
+      // }
     }
   }
 
@@ -2574,10 +2574,10 @@ void page_cur_delete_rec(
   if (cur_n_owned <= PAGE_DIR_SLOT_MIN_N_OWNED) {
     page_dir_balance_slot(page, page_zip, cur_slot_no);
 
-    const buf_block_t *block = page_cur_get_block(cursor);
-    if (index->shadow.IsApplicable() && block->model.build_) {
-      shadow::BuildLinearModel(block, index, page);
-    }
+    // const buf_block_t *block = page_cur_get_block(cursor);
+    // if (index->shadow.IsApplicable() && block->model.build_) {
+    //   shadow::BuildLinearModel(block, index, page);
+    // }
   }
 
 #ifdef UNIV_ZIP_DEBUG
