@@ -427,101 +427,6 @@ void page_cur_search_with_match(const buf_block_t *block,
   low = 0;
   up = page_dir_get_n_slots(page) - 1;
 
-  /* [main-im] Use page-level linear model to narrow binary search range */
-  if (index->shadow.IsApplicable() && !block->model.build_ &&
-      shadow::GetCompositeKeyLen(index) > 0) {
-    if (up > 1) {
-      std::unique_lock lock(block->model.build_mu_);
-      if (!block->model.build_) {
-        shadow::BuildLinearModel(block, index, page);
-      }
-    }
-  }
-
-  if (index->shadow.IsApplicable() && block->model.build_) {
-    uint64_t key = shadow::GetDtupleKey(tuple, index);
-    double predict_pos = block->model.model_.predict_double(key);
-    ulint n_slots = page_dir_get_n_slots(page) - 1;
-    ulint predict_pos_int = predict_pos < 0 ? 0 : std::min(predict_pos, static_cast<double>(n_slots));
-    cur_matched_fields = 0;
-
-    slot = page_dir_get_nth_slot(page, predict_pos_int);
-    const rec_t *slot_rec = page_dir_slot_get_rec(slot);
-    bool is_infimum = predict_pos_int == 0;
-    bool is_supremum = predict_pos_int == n_slots;
-    if (!is_infimum && !is_supremum) {
-      auto off = rec_get_offsets(slot_rec, index, offsets_,
-                                 dtuple_get_n_fields_cmp(tuple),
-                                 UT_LOCATION_HERE, &heap);
-      cmp = tuple->compare(slot_rec, index, off, &cur_matched_fields);
-    }
-
-    bool on_right;
-    if (mode == PAGE_CUR_G || mode == PAGE_CUR_LE) {
-      on_right = !is_infimum && (is_supremum || cmp < 0);
-    } else {
-      on_right = !is_infimum && (is_supremum || cmp <= 0);
-    }
-
-    if (on_right) {
-      up_matched_fields = cur_matched_fields;
-      ulint size = predict_pos_int;
-      ulint bound = 1;
-      while (bound < size) {
-        cur_matched_fields = 0;
-        slot = page_dir_get_nth_slot(page, predict_pos_int - bound);
-        const rec_t *r = page_dir_slot_get_rec(slot);
-        auto off = rec_get_offsets(r, index, offsets_,
-                                   dtuple_get_n_fields_cmp(tuple),
-                                   UT_LOCATION_HERE, &heap);
-        cmp = tuple->compare(r, index, off, &cur_matched_fields);
-        bool still_right;
-        if (mode == PAGE_CUR_G || mode == PAGE_CUR_LE)
-          still_right = cmp < 0;
-        else
-          still_right = cmp <= 0;
-        if (still_right) {
-          up_matched_fields = cur_matched_fields;
-          bound *= 2;
-        } else {
-          low_matched_fields = cur_matched_fields;
-          break;
-        }
-      }
-      low = predict_pos_int - std::min(bound, size);
-      if (low == 0) low_matched_fields = 0;
-      up = predict_pos_int - bound / 2;
-    } else {
-      low_matched_fields = cur_matched_fields;
-      ulint size = n_slots - predict_pos_int;
-      ulint bound = 1;
-      while (bound < size) {
-        cur_matched_fields = 0;
-        slot = page_dir_get_nth_slot(page, predict_pos_int + bound);
-        const rec_t *r = page_dir_slot_get_rec(slot);
-        auto off = rec_get_offsets(r, index, offsets_,
-                                   dtuple_get_n_fields_cmp(tuple),
-                                   UT_LOCATION_HERE, &heap);
-        cmp = tuple->compare(r, index, off, &cur_matched_fields);
-        bool still_right;
-        if (mode == PAGE_CUR_G || mode == PAGE_CUR_LE)
-          still_right = cmp < 0;
-        else
-          still_right = cmp <= 0;
-        if (!still_right) {
-          low_matched_fields = cur_matched_fields;
-          bound *= 2;
-        } else {
-          up_matched_fields = cur_matched_fields;
-          break;
-        }
-      }
-      low = predict_pos_int + bound / 2;
-      up = predict_pos_int + std::min(bound, size);
-      if (up == n_slots) up_matched_fields = 0;
-    }
-  }
-
   const ulint *const cached_offsets{index->rec_cache.offsets};
 #ifdef UNIV_DEBUG
   if (cached_offsets) {
@@ -798,8 +703,8 @@ void page_cur_search_with_match_bytes(
   low = 0;
   up = page_dir_get_n_slots(page) - 1;
 
-  if (index->shadow.IsApplicable() && !block->model.build_ &&
-      shadow::GetCompositeKeyLen(index) > 0) {
+  if (index->shadow.IsApplicable() && !block->model.build_) {
+    assert(shadow::GetCompositeKeyLen(index) > 0);
     if (up > 1) {
       std::unique_lock lock(block->model.build_mu_);
 

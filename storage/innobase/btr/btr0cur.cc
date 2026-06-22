@@ -1414,16 +1414,15 @@ retry_page_get:
     if (found && page_mode == PAGE_CUR_RTREE_GET_FATHER) {
       cursor->low_match = DICT_INDEX_SPATIAL_NODEPTR_SIZE + 1;
     }
-  // When in this path, shadow is not accessed, thus no need to use the linear model
-  // } else if (height == 0 && btr_search_enabled &&
-  //            !dict_index_is_spatial(index)) {
-  //   /* The adaptive hash index is only used when searching
-  //   for leaf pages (height==0), but not in r-trees.
-  //   We only need the byte prefix comparison for the purpose
-  //   of updating the adaptive hash index. */
-  //   page_cur_search_with_match_bytes(block, index, tuple, page_mode, &up_match,
-  //                                    &up_bytes, &low_match, &low_bytes,
-  //                                    page_cursor);
+  // When in this path, enable the linear model in leaf nodes
+  } else if (height == 0 && index->shadow.IsApplicable()) {
+    /* The adaptive hash index is only used when searching
+    for leaf pages (height==0), but not in r-trees.
+    We only need the byte prefix comparison for the purpose
+    of updating the adaptive hash index. */
+    page_cur_search_with_match_bytes(block, index, tuple, page_mode, &up_match,
+                                     &up_bytes, &low_match, &low_bytes,
+                                     page_cursor);
   } else {
     /* Search for complete index fields. */
     up_bytes = low_bytes = 0;
@@ -2228,10 +2227,10 @@ void btr_cur_open_at_index_side(bool from_left, dict_index_t *index,
       page_cur_set_after_last(block, page_cursor);
     }
 
-    /* Build page-level linear model for all pages (leaf + internal).
+    /* Build page-level linear model for leaf pages only.
        Skip ALEX tree construction (BtrEnsureShadow) — only the per-page
        linear model is used; the tree-level learned index is disabled. */
-    if (build_linear_model && !index->disable_ahi &&
+    if (build_linear_model && height == 0 && !index->disable_ahi &&
         btr_search_enabled && index->shadow.IsApplicable() &&
         !block->model.build_ &&
         shadow::GetCompositeKeyLen(index) > 0 &&
